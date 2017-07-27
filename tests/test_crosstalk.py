@@ -107,7 +107,8 @@ class CrosstalkTestCase(lsst.utils.tests.TestCase):
                                            lsst.afw.geom.Box2I(lsst.afw.geom.Point2I(0, 0),
                                                                lsst.afw.geom.Extent2I(2*width, 2*height)),
                                            amplifiers, lsst.afw.cameraGeom.Orientation(),
-                                           lsst.afw.geom.Extent2D(1, 1), {})
+                                           lsst.afw.geom.Extent2D(1, 1), {},
+                                           np.array(self.crosstalk, dtype=np.float32))
 
         self.exposure = lsst.afw.image.makeExposure(lsst.afw.image.makeMaskedImage(construct(withCrosstalk)))
         self.exposure.setDetector(ccd)
@@ -165,7 +166,7 @@ class CrosstalkTestCase(lsst.utils.tests.TestCase):
         ratios = extractCrosstalkRatios(self.exposure, threshold=self.value - 1)
         coeff, coeffErr, coeffNum = measureCrosstalkCoefficients(ratios)
         self.checkCoefficients(coeff, coeffErr, coeffNum)
-        subtractCrosstalk(self.exposure, coeff, minPixelToMask=self.value - 1,
+        subtractCrosstalk(self.exposure, minPixelToMask=self.value - 1,
                           crosstalkStr=self.crosstalkStr)
         self.checkSubtracted(self.exposure)
 
@@ -188,7 +189,6 @@ class CrosstalkTestCase(lsst.utils.tests.TestCase):
         self.checkCoefficients(coeff, coeffErr, coeffNum)
 
         config = IsrTask.ConfigClass()
-        config.crosstalk.coeffs = coeff.flatten().tolist()
         config.crosstalk.minPixelToMask = self.value - 1
         config.crosstalk.crosstalkMaskPlane = self.crosstalkStr
         isr = IsrTask(config=config)
