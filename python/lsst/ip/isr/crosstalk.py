@@ -37,28 +37,12 @@ import lsst.afw.detection
 from lsst.pex.config import Config, Field, ListField
 from lsst.pipe.base import Task
 
-import lsst.afw.display
-display = lsst.afw.display.Display(backend="ds9", frame=1)
-
 
 class CrosstalkConfig(Config):
     """Configuration for intra-CCD crosstalk removal"""
     minPixelToMask = Field(dtype=float, default=45000,
                            doc="Set crosstalk mask plane for pixels over this value")
     crosstalkMaskPlane = Field(dtype=str, default="CROSSTALK", doc="Name for crosstalk mask plane")
-    coeffs = ListField(
-        dtype=float,
-        doc=("Flattened crosstalk coefficient matrix; should have nAmps x nAmps entries. "
-             "Once 'reshape'-ed, ``coeffs[i][j]`` is the fraction of the j-th amp present on the i-th amp."),
-        default=[0, 0, 0, 0,
-                 0, 0, 0, 0,
-                 0, 0, 0, 0,
-                 0, 0, 0, 0],
-    )
-
-    def getCoeffs(self, numAmps):
-        """Return a 2-D numpy array of crosstalk coefficients of the proper shape"""
-        return np.array(self.coeffs).reshape((numAmps, numAmps))
 
 
 class CrosstalkTask(Task):
@@ -73,9 +57,13 @@ class CrosstalkTask(Task):
         exposure : `lsst.afw.image.Exposure`
             Exposure for which to remove crosstalk.
         """
+        detector = exposure.getDetector()
+        if not detector.hasCrosstalk():
+            self.log.warn("Crosstalk correction skipped: no crosstalk coefficients for detector")
+            return
         self.log.info("Applying crosstalk correction")
         numAmps = len(exposure.getDetector())
-        subtractCrosstalk(exposure, self.config.getCoeffs(numAmps), minPixelToMask=self.config.minPixelToMask,
+        subtractCrosstalk(exposure, minPixelToMask=self.config.minPixelToMask,
                           crosstalkStr=self.config.crosstalkMaskPlane)
 
 
@@ -140,7 +128,7 @@ def calculateBackground(mi, badPixels=["BAD"]):
     return lsst.afw.math.makeStatistics(mi, lsst.afw.math.MEDIAN, stats).getValue()
 
 
-def subtractCrosstalk(exposure, coeffs, badPixels=["BAD"], minPixelToMask=45000, crosstalkStr="CROSSTALK"):
+def subtractCrosstalk(exposure, badPixels=["BAD"], minPixelToMask=45000, crosstalkStr="CROSSTALK"):
     """Subtract the intra-CCD crosstalk from an exposure
 
     We set the mask plane indicated by ``crosstalkStr`` in a target amplifier
@@ -156,9 +144,6 @@ def subtractCrosstalk(exposure, coeffs, badPixels=["BAD"], minPixelToMask=45000,
     ----------
     exposure : `lsst.afw.image.Exposure`
         Exposure for which to subtract crosstalk.
-    coeffs : `numpy.ndarray`
-        Matrix of crosstalk coefficients. ``coeffs[i][j]`` is the fraction
-        of the j-th amp present on the i-th amp.
     badPixels : `list` of `str`
         Mask planes to ignore.
     minPixelToMask : `float`
@@ -169,18 +154,19 @@ def subtractCrosstalk(exposure, coeffs, badPixels=["BAD"], minPixelToMask=45000,
     """
     mi = exposure.getMaskedImage()
     mask = mi.getMask()
-    bg = calculateBackground(mi, badPixels)
 
     ccd = exposure.getDetector()
     numAmps = len(ccd)
+    coeffs = ccd.getCrosstalk()
     assert coeffs.shape == (numAmps, numAmps)
 
     # Set the crosstalkStr bit for the bright pixels (those which will have significant crosstalk correction)
     crosstalkPlane = mask.addMaskPlane(crosstalkStr)
-    lsst.afw.display.getDisplay().setMaskPlaneColor(crosstalkStr, lsst.afw.display.MAGENTA)
     footprints = lsst.afw.detection.FootprintSet(mi, lsst.afw.detection.Threshold(minPixelToMask))
     footprints.setMask(mask, crosstalkStr)
     crosstalk = mask.getPlaneBitMask(crosstalkStr)
+
+    backgrounds = [calculateBackground(mi.Factory(mi, amp.getBBox()), badPixels) for amp in ccd]
 
     subtrahend = mi.Factory(mi.getBBox())
     subtrahend.set((0, 0, 0))
@@ -194,12 +180,11 @@ def subtractCrosstalk(exposure, coeffs, badPixels=["BAD"], minPixelToMask=45000,
 
             jImage = extractAmp(mi, jAmp, iAmp.getReadoutCorner())
             jImage.getMask().getArray()[:] &= crosstalk  # Remove all other masks
-            jImage -= bg
+            jImage -= backgrounds[jj]
 
             iImage.scaledPlus(coeffs[ii, jj], jImage)
 
-    # Set crosstalkStr bit only for those pixels that have been significantly modified
-    # (not necessarily those that are bright originally).
+    # Set crosstalkStr bit only for those pixels that have been significantly modified (i.e., those
+    # masked as such in 'subtrahend'), not necessarily those that are bright originally.
     mask.clearMaskPlane(crosstalkPlane)
-
-    mi -= subtrahend
+    mi -= subtrahend  # also sets crosstalkStr bit for bright pixels
